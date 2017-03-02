@@ -12,8 +12,9 @@ use std::io::{Error as IoError, ErrorKind};
 ///
 /// An asset is loaded in two steps:
 ///
-/// 1) Load asset data (`AssetData`)
-/// 2) Turn asset data into asset (`from_data`)
+/// 1) Load asset data (`Asset::Data`)
+//  2) Pre-process data as much as possible (`from_data`)
+/// 3) Turn pre-processed data (`Asset::Async`) into asset (`from_async`)
 ///
 /// # Examples
 ///
@@ -36,7 +37,9 @@ use std::io::{Error as IoError, ErrorKind};
 ///
 /// impl Asset for Table {
 ///     type Data = Self;
-///     type Error = (); // Should be some InconsistentSizeError (if data.len() != num_rows * num_columns)
+///     type Async = Self;
+///     type DataError = (); // Should be some InconsistentSizeError (if data.len() != num_rows * num_columns)
+///     type AsyncError = ();
 ///
 ///     fn category() -> &'static str {
 ///         // Tables will be in the "tables" folder
@@ -46,6 +49,10 @@ use std::io::{Error as IoError, ErrorKind};
 ///
 ///     fn from_data(data: Self, _: &mut Context) -> Result<Self, ()> {
 ///         Ok(data) // Ommitted here: Check for size
+///     }
+///
+///     fn from_async(async: Self, _: &mut Context) -> Result<Self, ()> {
+///         Ok(async)
 ///     }
 /// }
 ///
@@ -94,12 +101,27 @@ use std::io::{Error as IoError, ErrorKind};
 /// ```
 pub trait Asset: Sized {
     /// The data type, an intermediate format.
+    /// It is supposed to be plain data,
+    /// which could also be reexported
+    /// or loaded at compile-time.
     /// This may also be `Self` if this asset does
     /// not depend on `Context`.
-    type Data;
+    type Data: Send;
+    /// Another intermediate type, which is
+    /// processed asynchronously
+    type Async: Send;
     /// The error type that may be returned if
     /// `from_data` fails.
-    type Error: Debug;
+    type DataError: Debug + Send;
+    /// The error type that may be returned if
+    /// `from_async` fails.
+    type AsyncError: Debug + Send;
+    /// The parameter supplied to
+    /// the `from_data` function.
+    type DataParam: Send;
+    /// The parameter supplied to
+    /// the `from_async` param.
+    type AsyncParam: Send;
 
     /// Returns the category, which is
     /// used for subfolders.
@@ -107,8 +129,13 @@ pub trait Asset: Sized {
     /// Examples are `"meshes"` and `"textures"`.
     fn category() -> &'static str;
 
-    /// Create the asset from the data and the context (used to create buffers for the gpu).
-    fn from_data(data: Self::Data, context: &mut Context) -> Result<Self, Self::Error>;
+    /// Create the intermediate async structure from the data and the context (used to create buffers for the gpu).
+    /// Try to do as much as possible here (async) in order to make asset loading more
+    /// parallel.
+    fn from_data(data: Self::Data, param: Self::DataParam) -> Result<Self::Async, Self::DataError>;
+
+    /// Create the asset from the intermediate `Async` type and the context (used to create buffers for the gpu).
+    fn from_async(async: Self::Async, param: Self::AsyncParam) -> Result<Self, Self::AsyncError>;
 }
 
 /// Specifies an asset format. Note that

@@ -22,14 +22,20 @@ pub struct Mesh {
 
 impl Asset for Mesh {
     type Data = Vec<VertexPosNormal>;
-    type Error = ();
+    type Async = Vec<VertexPosNormal>;
+    type DataError = ();
+    type AsyncError = ();
 
     fn category() -> &'static str {
         "meshes"
     }
 
-    fn from_data(data: Vec<VertexPosNormal>, context: &mut Context) -> Result<Mesh, ()> {
-        let (buffer, slice) = context.factory.create_vertex_buffer_with_slice(&data, ());
+    fn from_data(data: Vec<VertexPosNormal>, _: &mut Context) -> Result<Vec<VertexPosNormal>, ()> {
+        Ok(data)
+    }
+
+    fn from_async(async: Vec<VertexPosNormal>, context: &mut Context) -> Result<Mesh, ()> {
+        let (buffer, slice) = context.factory.create_vertex_buffer_with_slice(&async, ());
 
         Ok(Mesh {
             buffer: buffer,

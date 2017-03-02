@@ -67,30 +67,27 @@ pub struct AssetLoader {
 /// data. If it hasn't yet finished, it will block
 /// the calling thread.
 pub struct AssetFuture<T: Asset> {
-    inner: CpuFuture<T::Data, AssetError>,
+    inner: CpuFuture<T::Async, AssetError<T>>,
 }
 
 /// The error that can occurr when trying
 /// to import asset data from a store.
 #[derive(Debug)]
-pub enum AssetError {
+pub enum AssetError<T: Asset> {
     /// Occurs if the `AssetStore` could not load
     /// the asset. See `AssetStoreInfo` for details.
     StoreError(AssetStoreError),
     /// Raised if the data is in an invalid format
     /// or there was an io error.
     ImportError(ImportError),
-}
-
-/// An error type which may be return when using
-/// `AssetFuture::finish`.
-#[derive(Debug)]
-pub enum FinishError<T: Asset> {
-    /// There was an `AssetError`.
-    Asset(AssetError),
-    /// The asset could not be instantiated from
-    /// the data.
-    Finish(T::Error), // TODO: Find better names
+    /// Represents an error that occured
+    /// when converting T::Data to T::Async.
+    DataError(T::DataError),
+    /// The error that may be raised if
+    /// the async intermediate format
+    /// could not be converted into the
+    /// final asset.
+    AsyncError(T::AsyncError),
 }
 
 impl AssetLoader {
@@ -101,13 +98,14 @@ impl AssetLoader {
     }
 
     /// Loads just the data for some asset (blocking).
-    pub fn load_data<T, D, S, F>(store: &S, name: &str, format: F) -> Result<D, AssetError>
-        where T: Asset<Data = D>,
+    pub fn load_data<T, S, F>(store: &S, name: &str, format: F) -> Result<T::Data, AssetError<T>>
+        where T: Asset,
               S: AssetStore,
-              F: AssetFormat + Import<D>
+              F: AssetFormat + Import<T::Data>
     {
         let bytes = store.read_asset::<T, _>(name, &format)?;
-        format.import(bytes).map_err(|x| AssetError::ImportError(x))
+        let data = format.import(bytes).map_err(|x| AssetError::ImportError(x))?;
+        T::from_data(data)
     }
 
     /// Load the data using one of the threads from the
@@ -117,16 +115,21 @@ impl AssetLoader {
     /// import it, use `MyAsset::from_data(data, context)`.
     pub fn load<T, S, F>(&self, store: &S, name: &str, format: F) -> AssetFuture<T>
         where T: Asset,
-              T::Data: Send + 'static,
-              T::Error: Send + 'static,
+              T::Data: 'static,
+              T::DataError: 'static,
+              T::Async: 'static,
+              T::AsyncError: 'static,
               S: AssetStore + Clone + Send + Sync + 'static,
               F: AssetFormat + Import<T::Data> + Send + 'static
     {
         let store: S = store.clone();
         let name = name.to_string();
 
-        let cpu_future: CpuFuture<T::Data, _> = self.cpupool
-            .spawn_fn(move || Self::load_data::<T, _, _, _>(&store, &name, format));
+        let cpu_future: CpuFuture<T::Async, _> = self.cpupool
+            .spawn_fn(move || {
+                let data = Self::load_data::<T, _, _>(&store, &name, format)?;
+                T::from_data(data).map_err(|x| AssetError::DataError(x))
+            });
 
         AssetFuture { inner: cpu_future }
     }
@@ -141,8 +144,10 @@ impl AssetLoader {
     /// load it from the embedded assets.
     pub fn load_default<T, F>(&self, name: &str, format: F) -> AssetFuture<T>
         where T: Asset,
-              T::Data: Send + 'static,
-              T::Error: Send + 'static,
+              T::Data: 'static,
+              T::DataError: 'static,
+              T::Async: 'static,
+              T::AsyncError: 'static,
               F: AssetFormat + Import<T::Data> + Send + 'static
     {
         let store = DefaultStore;
@@ -150,7 +155,7 @@ impl AssetLoader {
     }
 }
 
-impl<T: Asset + Send> AssetFuture<T> {
+impl<T: Asset> AssetFuture<T> {
     /// This blocks the current thread until the data
     /// is imported (if it isn't already). After that,
     /// it'll do things which have to be done on the
@@ -170,49 +175,32 @@ impl<T: Asset + Send> AssetFuture<T> {
     ///
     /// let tree = tree.finish(&mut context);
     /// ```
-    pub fn finish(self, context: &mut Context) -> Result<T, FinishError<T>>
-        where Self: Future<Item = T::Data, Error = AssetError>
+    pub fn finish(self, context: &mut Context) -> Result<T, AssetError<T>>
+        where Self: Future<Item = T::Async, Error = AssetError<T>>
     {
-        let data = self.wait()?;
-        T::from_data(data, context).map_err(|x| FinishError::Finish(x))
+        let async = self.wait()?;
+        T::from_async(async, context).map_err(|x| AssetError::AsyncError(x))
     }
 }
 
 impl<T: Asset + 'static> Future for AssetFuture<T>
     where T::Data: Send
 {
-    type Item = T::Data;
-    type Error = AssetError;
+    type Item = T::Async;
+    type Error = AssetError<T>;
 
-    fn poll(&mut self) -> Result<Async<T::Data>, AssetError> {
+    fn poll(&mut self) -> Result<Async<T::Async>, AssetError<T>> {
         self.inner.poll()
     }
 }
 
-impl From<AssetStoreError> for AssetError {
+impl<T: Asset> From<AssetStoreError> for AssetError<T> {
     fn from(e: AssetStoreError) -> Self {
         AssetError::StoreError(e)
     }
 }
 
-impl<T: Asset> From<AssetError> for FinishError<T> {
-    fn from(e: AssetError) -> Self {
-        FinishError::Asset(e)
-    }
-}
-
-impl<T: Asset> Display for FinishError<T> {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> {
-        match self {
-            &FinishError::Asset(ref x) => write!(f, "Error when loading asset data: {}", x),
-            &FinishError::Finish(ref x) => {
-                write!(f, "Error when instantiating asset from data: {:?}", x)
-            }
-        }
-    }
-}
-
-impl Display for AssetError {
+impl<T: Asset> Display for AssetError<T> {
     fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> {
         match self {
             &AssetError::StoreError(ref x) => write!(f, "IO Error: {}", x),

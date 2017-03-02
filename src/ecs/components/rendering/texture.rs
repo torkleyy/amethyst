@@ -50,14 +50,20 @@ impl Texture {
 
 impl Asset for Texture {
     type Data = TextureData;
-    type Error = GfxError;
+    type Async = TextureData;
+    type DataError = ();
+    type AsyncError = GfxError;
 
     fn category() -> &'static str {
         "textures"
     }
 
-    fn from_data(data: TextureData, context: &mut Context) -> Result<Self, GfxError> {
-        let inner = match data {
+    fn from_data(data: TextureData, _: &mut Context) -> Result<TextureData, ()> {
+        Ok(data)
+    }
+
+    fn from_async(async: TextureData, context: &mut Context) -> Result<Self, GfxError> {
+        let inner = match async {
             TextureData::Raw(x) => {
                 // TODO: I feel bad for using unsafe here but it
                 // seems to be safe
